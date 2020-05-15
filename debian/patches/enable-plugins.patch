@@ -1,0 +1,50 @@
+diff --git a/meson_options.txt b/meson_options.txt
+index b2b2af73..5731de9c 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -1,7 +1,7 @@
+ option('docs',
+        description: 'Build documentation',
+        type: 'boolean',
+-       value: false)
++       value: true)
+ option('examples',
+        description: 'Build examples',
+        type: 'boolean',
+@@ -67,11 +67,11 @@ option('control',
+ option('audiotestsrc',
+        description: 'Enable audiotestsrc spa plugin integration',
+        type: 'boolean',
+-       value: false)
++       value: true)
+ option('ffmpeg',
+        description: 'Enable ffmpeg spa plugin integration',
+        type: 'boolean',
+-       value: false)
++       value: true)
+ option('jack',
+        description: 'Enable jack spa plugin integration',
+        type: 'boolean',
+@@ -87,7 +87,7 @@ option('evl',
+ option('test',
+        description: 'Enable test spa plugin integration',
+        type: 'boolean',
+-       value: false)
++       value: true)
+ option('v4l2',
+        description: 'Enable v4l2 spa plugin integration',
+        type: 'boolean',
+@@ -99,11 +99,11 @@ option('videoconvert',
+ option('videotestsrc',
+        description: 'Enable videotestsrc spa plugin integration',
+        type: 'boolean',
+-       value: false)
++       value: true)
+ option('volume',
+        description: 'Enable volume spa plugin integration',
+        type: 'boolean',
+-       value: false)
++       value: true)
+ option('vulkan',
+        description: 'Enable vulkan spa plugin integration',
+        type: 'boolean',
