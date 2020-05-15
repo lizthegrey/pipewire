@@ -2,10 +2,13 @@
 
 set -e
 
-while getopts ":b:" opt; do
+while getopts ":b:v:" opt; do
 	case ${opt} in
 		b)
 			BUILDDIR=${OPTARG}
+			;;
+		v)
+			VERSION=${OPTARG}
 			;;
 		\?)
 			echo "Invalid option: -${OPTARG}"
@@ -31,7 +34,8 @@ fi
 export PIPEWIRE_CONFIG_FILE="${BUILDDIR}/src/daemon/pipewire.conf"
 export SPA_PLUGIN_DIR="${BUILDDIR}/spa/plugins"
 export PIPEWIRE_MODULE_DIR="${BUILDDIR}/src/modules"
-export PATH="${BUILDDIR}/src/daemon:${PATH}"
+export PATH="${BUILDDIR}/src/daemon:${BUILDDIR}/src/tools:${BUILDDIR}/src/examples:${PATH}"
+export LD_LIBRARY_PATH="${BUILDDIR}/pipewire-pulseaudio/src/:${BUILDDIR}/src/pipewire/:${BUILDDIR}/pipewire-jack/src/:${LD_LIBRARY_PATH}"
 export GST_PLUGIN_PATH="${BUILDDIR}/src/gst/:${GST_PLUGIN_PATH}"
 
 # FIXME: find a nice, shell-neutral way to specify a prompt
