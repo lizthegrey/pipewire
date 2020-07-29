@@ -98,17 +98,19 @@ void pw_impl_port_update_state(struct pw_impl_port *port, enum pw_impl_port_stat
 {
 	enum pw_impl_port_state old = port->state;
 
-	if (old != state) {
-		pw_log(state == PW_IMPL_PORT_STATE_ERROR ?
-				SPA_LOG_LEVEL_ERROR : SPA_LOG_LEVEL_DEBUG,
-			NAME" %p: state %s -> %s (%s)", port,
-			port_state_as_string(old), port_state_as_string(state), error);
+	port->state = state;
+	free((void*)port->error);
+	port->error = error;
 
-		port->state = state;
-		free((void*)port->error);
-		port->error = error;
-		pw_impl_port_emit_state_changed(port, old, state, error);
-	}
+	if (old == state)
+		return;
+
+	pw_log(state == PW_IMPL_PORT_STATE_ERROR ?
+			SPA_LOG_LEVEL_ERROR : SPA_LOG_LEVEL_DEBUG,
+		NAME" %p: state %s -> %s (%s)", port,
+		port_state_as_string(old), port_state_as_string(state), error);
+
+	pw_impl_port_emit_state_changed(port, old, state, error);
 }
 
 static int tee_process(void *object)
@@ -174,7 +176,8 @@ static int schedule_mix_reuse_buffer(void *object, uint32_t port_id, uint32_t bu
 
 	spa_list_for_each(mix, &this->rt.mix_list, rt_link) {
 		pw_log_trace_fp(NAME" %p: reuse buffer %d %d", this, port_id, buffer_id);
-		spa_node_port_reuse_buffer(this->node->node, port_id, buffer_id);
+		/* FIXME send reuse buffer to peer */
+		break;
 	}
 	return 0;
 }
@@ -305,6 +308,11 @@ static void emit_params(struct pw_impl_port *port, uint32_t *changed_ids, uint32
 	for (i = 0; i < n_changed_ids; i++) {
 		struct pw_resource *resource;
 		int subscribed = 0;
+
+		pw_log_debug(NAME" %p: emit param %d/%d: %d", port, i, n_changed_ids,
+				changed_ids[i]);
+
+		pw_impl_port_emit_param_changed(port, changed_ids[i]);
 
 		/* first check if anyone is subscribed */
 		spa_list_for_each(resource, &port->global->resource_list, link) {
@@ -774,6 +782,7 @@ int pw_impl_port_register(struct pw_impl_port *port,
 	const char *keys[] = {
 		PW_KEY_OBJECT_PATH,
 		PW_KEY_FORMAT_DSP,
+		PW_KEY_AUDIO_CHANNEL,
 		PW_KEY_PORT_NAME,
 		PW_KEY_PORT_DIRECTION,
 		PW_KEY_PORT_PHYSICAL,
@@ -973,6 +982,8 @@ void pw_impl_port_destroy(struct pw_impl_port *port)
 	pw_log_debug(NAME" %p: destroy", port);
 
 	pw_impl_port_emit_destroy(port);
+
+	pw_impl_port_unlink(port);
 
 	pw_log_debug(NAME" %p: control destroy", port);
 	spa_list_consume(control, &port->control_list[0], port_link)

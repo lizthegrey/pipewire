@@ -24,18 +24,14 @@
 
 #include <stdio.h>
 #include <errno.h>
-#include <time.h>
+#include <signal.h>
 #include <math.h>
 
 #include <spa/param/video/format-utils.h>
-#include <spa/param/props.h>
 
 #include <pipewire/pipewire.h>
 
-#define BPP	3
-#define WIDTH	320
-#define HEIGHT	200
-#define CROP	8
+#define BPP		3
 #define CURSOR_WIDTH	64
 #define CURSOR_HEIGHT	64
 #define CURSOR_BPP	4
@@ -62,6 +58,7 @@ struct data {
 
 	double crop;
 	double accumulator;
+	int res;
 };
 
 static void draw_elipse(uint32_t *dst, int width, int height, uint32_t color)
@@ -132,8 +129,8 @@ static void on_timeout(void *userdata, uint64_t expirations)
 		data->crop = (sin(data->accumulator) + 1.0) * 32.0;
 		mc->region.position.x = data->crop;
 		mc->region.position.y = data->crop;
-		mc->region.size.width = WIDTH - data->crop*2;
-		mc->region.size.height = HEIGHT - data->crop*2;
+		mc->region.size.width = data->format.size.width - data->crop*2;
+		mc->region.size.height = data->format.size.height - data->crop*2;
 	}
 	if ((mcs = spa_buffer_find_meta_data(buf, SPA_META_Cursor, sizeof(*mcs)))) {
 		struct spa_meta_bitmap *mb;
@@ -272,6 +269,12 @@ static const struct pw_stream_events stream_events = {
 	.param_changed = on_stream_param_changed,
 };
 
+static void do_quit(void *userdata, int signal_number)
+{
+	struct data *data = userdata;
+	pw_main_loop_quit(data->loop);
+}
+
 int main(int argc, char *argv[])
 {
 	struct data data = { 0, };
@@ -282,13 +285,20 @@ int main(int argc, char *argv[])
 	pw_init(&argc, &argv);
 
 	data.loop = pw_main_loop_new(NULL);
+
+	pw_loop_add_signal(pw_main_loop_get_loop(data.loop), SIGINT, do_quit, &data);
+	pw_loop_add_signal(pw_main_loop_get_loop(data.loop), SIGTERM, do_quit, &data);
+
 	data.context = pw_context_new(pw_main_loop_get_loop(data.loop), NULL, 0);
 
 	data.timer = pw_loop_add_timer(pw_main_loop_get_loop(data.loop), on_timeout, &data);
 
 	data.core = pw_context_connect(data.context, NULL, 0);
-	if (data.core == NULL)
-		return -1;
+	if (data.core == NULL) {
+		fprintf(stderr, "can't connect: %m\n");
+		data.res = -errno;
+		goto cleanup;
+	}
 
 	data.stream = pw_stream_new(data.core, "video-src",
 		pw_properties_new(
@@ -320,8 +330,10 @@ int main(int argc, char *argv[])
 
 	pw_main_loop_run(data.loop);
 
+cleanup:
 	pw_context_destroy(data.context);
 	pw_main_loop_destroy(data.loop);
+	pw_deinit();
 
-	return 0;
+	return data.res;
 }

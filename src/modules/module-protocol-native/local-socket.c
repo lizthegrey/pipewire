@@ -46,7 +46,7 @@ get_remote(const struct spa_dict *props)
 	if (name == NULL)
 		name = getenv("PIPEWIRE_REMOTE");
 	if (name == NULL)
-		name = "pipewire-0";
+		name = PW_DEFAULT_REMOTE;
 	return name;
 }
 
@@ -67,6 +67,7 @@ int pw_protocol_native_connect_local_socket(struct pw_protocol_client *client,
         }
 
 	name = get_remote(props);
+	pw_log_info("connecting to '%s'", name);
 
         if ((fd = socket(PF_LOCAL, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0)) < 0) {
 		res = -errno;
@@ -87,6 +88,7 @@ int pw_protocol_native_connect_local_socket(struct pw_protocol_client *client,
         size = offsetof(struct sockaddr_un, sun_path) + name_size;
 
         if (connect(fd, (struct sockaddr *) &addr, size) < 0) {
+		pw_log_debug("connect to '%s' failed: %m", name);
 		if (errno == ENOENT)
 			errno = EHOSTDOWN;
 		res = -errno;

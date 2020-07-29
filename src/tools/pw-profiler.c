@@ -114,15 +114,14 @@ static int process_clock(struct data *d, const struct spa_pod *pod, struct point
 
 static int process_driver_block(struct data *d, const struct spa_pod *pod, struct point *point)
 {
-	union {
-		char *s;
-	} dummy;
-	uint32_t driver_id;
+	char *name = NULL;
+	uint32_t driver_id = 0;
 	struct measurement driver;
 
+	spa_zero(driver);
 	spa_pod_parse_struct(pod,
 			SPA_POD_Int(&driver_id),
-			SPA_POD_String(&dummy.s),
+			SPA_POD_String(&name),
 			SPA_POD_Long(&driver.prev_signal),
 			SPA_POD_Long(&driver.signal),
 			SPA_POD_Long(&driver.awake),
@@ -169,8 +168,8 @@ static int add_follower(struct data *d, uint32_t id, const char *name)
 
 static int process_follower_block(struct data *d, const struct spa_pod *pod, struct point *point)
 {
-	uint32_t id;
-	const char *name;
+	uint32_t id = 0;
+	const char *name =  NULL;
 	struct measurement m;
 	int idx;
 
@@ -642,12 +641,16 @@ int main(int argc, char *argv[])
 
 	pw_main_loop_run(data.loop);
 
+	pw_proxy_destroy((struct pw_proxy*)data.profiler);
+	pw_proxy_destroy((struct pw_proxy*)data.registry);
 	pw_context_destroy(data.context);
 	pw_main_loop_destroy(data.loop);
 
 	fclose(data.output);
 
 	dump_scripts(&data);
+
+	pw_deinit();
 
 	return 0;
 }

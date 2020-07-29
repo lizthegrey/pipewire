@@ -212,7 +212,7 @@ static void stream_state_changed(void *data, enum pw_stream_state old,
 	pw_log_debug("stream %p: state  '%s'->'%s' (%d)", s, pw_stream_state_as_string(old),
 			pw_stream_state_as_string(state), s->state);
 
-	if (s->state == PA_STREAM_TERMINATED)
+	if (s->state == PA_STREAM_TERMINATED || c == NULL)
 		return;
 
 	switch(state) {
@@ -554,13 +554,13 @@ static void stream_process(void *data)
 	if (s->direction == PA_STREAM_PLAYBACK) {
 		queue_output(s);
 
-		if (s->write_callback)
+		if (s->write_callback && s->state == PA_STREAM_READY)
 			s->write_callback(s, s->maxblock, s->write_userdata);
 	}
 	else {
 		pull_input(s);
 
-		if (s->read_callback && s->ready_bytes > 0)
+		if (s->read_callback && s->ready_bytes > 0 && s->state == PA_STREAM_READY)
 			s->read_callback(s, s->ready_bytes, s->read_userdata);
 	}
 }
@@ -600,7 +600,6 @@ static pa_stream* stream_new(pa_context *c, const char *name,
 	pa_stream *s;
 	char str[1024];
 	unsigned int i;
-	struct pw_properties *props;
 
 	spa_assert(c);
 	spa_assert(c->refcount >= 1);
@@ -619,10 +618,6 @@ static pa_stream* stream_new(pa_context *c, const char *name,
 		pa_proplist_sets(s->proplist, PA_PROP_MEDIA_NAME, name);
 	else
 		name = pa_proplist_gets(s->proplist, PA_PROP_MEDIA_NAME);
-
-	props = pw_properties_new(PW_KEY_CLIENT_API, "pulseaudio",
-				NULL);
-	pw_properties_update_proplist(props, s->proplist);
 
 	s->refcount = 1;
 	s->context = c;
@@ -808,7 +803,7 @@ uint32_t pa_stream_get_index(PA_CONST pa_stream *s)
 	spa_assert(s);
 	spa_assert(s->refcount >= 1);
 
-	idx = pw_stream_get_node_id(s->stream);
+	idx = s->stream ? pw_stream_get_node_id(s->stream) : PA_INVALID_INDEX;
 	pw_log_debug("stream %p: index %u", s, idx);
 	return idx;
 }
@@ -925,16 +920,46 @@ static int create_stream(pa_stream_direction_t direction,
         struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
 	uint32_t sample_rate = 0, stride = 0, latency_num;
 	const char *str;
-	uint32_t devid;
+	uint32_t devid, n_items;
 	struct global *g;
-	struct spa_dict_item items[5];
+	struct spa_dict_item items[7];
 	char latency[64];
-	bool monitor;
+	bool monitor, no_remix;
 	const char *name;
 	pa_context *c = s->context;
 
 	spa_assert(s);
 	spa_assert(s->refcount >= 1);
+	spa_assert(direction == PA_STREAM_PLAYBACK || direction == PA_STREAM_RECORD);
+
+	PA_CHECK_VALIDITY(s->context, s->state == PA_STREAM_UNCONNECTED, PA_ERR_BADSTATE);
+	PA_CHECK_VALIDITY(s->context, s->direct_on_input == PA_INVALID_INDEX || direction == PA_STREAM_RECORD, PA_ERR_BADSTATE);
+	PA_CHECK_VALIDITY(s->context, !(flags & ~(PA_STREAM_START_CORKED|
+						PA_STREAM_INTERPOLATE_TIMING|
+						PA_STREAM_NOT_MONOTONIC|
+						PA_STREAM_AUTO_TIMING_UPDATE|
+						PA_STREAM_NO_REMAP_CHANNELS|
+						PA_STREAM_NO_REMIX_CHANNELS|
+						PA_STREAM_FIX_FORMAT|
+						PA_STREAM_FIX_RATE|
+						PA_STREAM_FIX_CHANNELS|
+						PA_STREAM_DONT_MOVE|
+						PA_STREAM_VARIABLE_RATE|
+						PA_STREAM_PEAK_DETECT|
+						PA_STREAM_START_MUTED|
+						PA_STREAM_ADJUST_LATENCY|
+						PA_STREAM_EARLY_REQUESTS|
+						PA_STREAM_DONT_INHIBIT_AUTO_SUSPEND|
+						PA_STREAM_START_UNMUTED|
+						PA_STREAM_FAIL_ON_SUSPEND|
+						PA_STREAM_RELATIVE_VOLUME|
+						PA_STREAM_PASSTHROUGH)), PA_ERR_INVALID);
+
+	PA_CHECK_VALIDITY(s->context, s->context->state == PA_CONTEXT_READY, PA_ERR_BADSTATE);
+	PA_CHECK_VALIDITY(s->context, direction == PA_STREAM_RECORD || !(flags & (PA_STREAM_PEAK_DETECT)), PA_ERR_INVALID);
+	PA_CHECK_VALIDITY(s->context, !sync_stream || (direction == PA_STREAM_PLAYBACK && sync_stream->direction == PA_STREAM_PLAYBACK), PA_ERR_INVALID);
+	PA_CHECK_VALIDITY(s->context, (flags & (PA_STREAM_ADJUST_LATENCY|PA_STREAM_EARLY_REQUESTS)) != (PA_STREAM_ADJUST_LATENCY|PA_STREAM_EARLY_REQUESTS), PA_ERR_INVALID);
+
 
 	pw_log_debug("stream %p: connect %s %08x", s, dev, flags);
 
@@ -972,6 +997,7 @@ static int create_stream(pa_stream_direction_t direction,
 	if (flags & PA_STREAM_DONT_MOVE)
 		fl |= PW_STREAM_FLAG_DONT_RECONNECT;
 	monitor = (flags & PA_STREAM_PEAK_DETECT);
+	no_remix = (flags & PA_STREAM_NO_REMIX_CHANNELS);
 
 	if (pa_sample_spec_valid(&s->sample_spec)) {
 		params[n_params++] = get_param(s, &s->sample_spec, &s->channel_map, &b);
@@ -1030,6 +1056,8 @@ static int create_stream(pa_stream_direction_t direction,
 
 		if ((g = pa_context_find_global_by_name(s->context, mask, dev)) != NULL)
 			devid = g->id;
+		else if ((devid = atoi(dev)) == 0)
+			devid = PW_ID_ANY;
 	}
 
 	if ((str = pa_proplist_gets(s->proplist, PA_PROP_MEDIA_ROLE)) == NULL)
@@ -1057,15 +1085,20 @@ static int create_stream(pa_stream_direction_t direction,
 
 	latency_num = s->buffer_attr.minreq / stride;
 	sprintf(latency, "%u/%u", SPA_MAX(latency_num, 1u), sample_rate);
-	items[0] = SPA_DICT_ITEM_INIT(PW_KEY_NODE_LATENCY, latency);
-	items[1] = SPA_DICT_ITEM_INIT(PW_KEY_MEDIA_TYPE, "Audio");
-	items[2] = SPA_DICT_ITEM_INIT(PW_KEY_MEDIA_CATEGORY,
+	n_items = 0;
+	items[n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_NODE_LATENCY, latency);
+	items[n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_MEDIA_TYPE, "Audio");
+	items[n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_MEDIA_CATEGORY,
 				direction == PA_STREAM_PLAYBACK ?
-					"Playback" : "Capture");
-	items[3] = SPA_DICT_ITEM_INIT(PW_KEY_MEDIA_ROLE, str);
-	items[4] = SPA_DICT_ITEM_INIT(PW_KEY_STREAM_MONITOR, monitor ? "true" : "false");
-
-	pw_stream_update_properties(s->stream, &SPA_DICT_INIT(items, 5));
+					"Playback" : monitor ? "Monitor" : "Capture");
+	items[n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_MEDIA_ROLE, str);
+	if (monitor)
+		items[n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_STREAM_MONITOR, "true");
+	if (no_remix)
+		items[n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_STREAM_DONT_REMIX, "true");
+	if (devid == PW_ID_ANY && dev != NULL)
+		items[n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_NODE_TARGET, dev);
+	pw_stream_update_properties(s->stream, &SPA_DICT_INIT(items, n_items));
 
 	res = pw_stream_connect(s->stream,
 				direction == PA_STREAM_PLAYBACK ?
@@ -1115,6 +1148,7 @@ int pa_stream_disconnect(pa_stream *s)
 	spa_assert(s);
 	spa_assert(s->refcount >= 1);
 
+	PA_CHECK_VALIDITY(c, c != NULL, PA_ERR_BADSTATE);
 	PA_CHECK_VALIDITY(c, c->state == PA_CONTEXT_READY, PA_ERR_BADSTATE);
 
 	pw_log_debug("stream %p: disconnect", s);
@@ -1963,8 +1997,6 @@ int pa_stream_set_monitor_stream(pa_stream *s, uint32_t sink_input_idx)
 {
 	spa_assert(s);
 	spa_assert(s->refcount >= 1);
-
-	pw_log_warn("stream %p: Not implemented %d", s, sink_input_idx);
 
 	PA_CHECK_VALIDITY(s->context, sink_input_idx != PA_INVALID_INDEX, PA_ERR_INVALID);
 	PA_CHECK_VALIDITY(s->context, s->state == PA_STREAM_UNCONNECTED, PA_ERR_BADSTATE);

@@ -48,7 +48,7 @@
 #define MIN_BUFFERS	3u
 #define MAX_BUFFERS	64u
 
-#define MAX_CHANNELS	32
+#define MAX_CHANNELS	64
 #define MAX_RATE	(48000*8)
 
 #define MIN_PERIOD	64
@@ -64,6 +64,7 @@ typedef struct {
 	unsigned int activated:1;	/* PipeWire is activated? */
 	unsigned int drained:1;
 	unsigned int draining:1;
+	unsigned int xrun_detected:1;
 
 	snd_pcm_uframes_t hw_ptr;
 	snd_pcm_uframes_t boundary;
@@ -160,9 +161,15 @@ static int snd_pcm_pipewire_poll_revents(snd_pcm_ioplug_t *io,
 static snd_pcm_sframes_t snd_pcm_pipewire_pointer(snd_pcm_ioplug_t *io)
 {
 	snd_pcm_pipewire_t *pw = io->private_data;
+	if (pw->xrun_detected)
+		return -EPIPE;
 	if (pw->error < 0)
 		return pw->error;
+#ifdef SND_PCM_IOPLUG_FLAG_BOUNDARY_WA
 	return pw->hw_ptr;
+#else
+	return pw->hw_ptr % io->buffer_size;
+#endif
 }
 
 static int
@@ -274,13 +281,16 @@ snd_pcm_pipewire_process_record(snd_pcm_pipewire_t *pw, struct pw_buffer *b, snd
 	avail = SPA_MIN(maxsize, *hw_avail * bpf);
 	index = d[0].chunk->offset;
 
+	if (avail < maxsize)
+		pw->xrun_detected = true;
+
 	do {
 	avail = SPA_MIN(avail, pw->min_avail * bpf);
 	offset = index % maxsize;
 	nbytes = SPA_MIN(avail, maxsize - offset);
 	ptr = SPA_MEMBER(d[0].data, offset, void);
 
-	pw_log_trace(NAME" %p: %d %d %d %p", pw, nbytes, avail, offset, ptr);
+	pw_log_trace(NAME" %p: %d %ld %d %d %d %p", pw, maxsize, *hw_avail, nbytes, avail, offset, ptr);
 	nframes = nbytes / bpf;
 
 	for (channel = 0; channel < io->channels; channel++) {
@@ -481,6 +491,7 @@ static int snd_pcm_pipewire_prepare(snd_pcm_ioplug_t *io)
 
 done:
 	pw->hw_ptr = 0;
+	pw->xrun_detected = false;
 
 	pw_thread_loop_unlock(pw->main_loop);
 
@@ -866,6 +877,7 @@ static const struct pw_core_events core_events = {
 
 static int snd_pcm_pipewire_open(snd_pcm_t **pcmp, const char *name,
 			     const char *node_name,
+			     const char *server_name,
 			     const char *playback_node,
 			     const char *capture_node,
 			     snd_pcm_stream_t stream,
@@ -879,7 +891,7 @@ static int snd_pcm_pipewire_open(snd_pcm_t **pcmp, const char *name,
 	snd_pcm_pipewire_t *pw;
 	int err;
 	const char *str;
-	struct pw_properties *props;
+	struct pw_properties *props = NULL;
 	struct pw_loop *loop;
 
 	assert(pcmp);
@@ -904,8 +916,10 @@ static int snd_pcm_pipewire_open(snd_pcm_t **pcmp, const char *name,
 	else
 		pw->node_name = strdup(node_name);
 
-	if (pw->node_name == NULL)
-		return -errno;
+	if (pw->node_name == NULL) {
+		err = -errno;
+		goto error;
+	}
 
 	pw->target = PW_ID_ANY;
 	if (str != NULL)
@@ -929,11 +943,15 @@ static int snd_pcm_pipewire_open(snd_pcm_t **pcmp, const char *name,
 	else
 		pw_properties_set(props, PW_KEY_APP_NAME, "ALSA plug-in");
 
+	if (server_name)
+		pw_properties_set(props, PW_KEY_REMOTE_NAME, server_name);
+
 	if ((err = pw_thread_loop_start(pw->main_loop)) < 0)
 		goto error;
 
 	pw_thread_loop_lock(pw->main_loop);
 	pw->core = pw_context_connect(pw->context, props, 0);
+	props = NULL;
 	if (pw->core == NULL) {
 		err = -errno;
 		pw_thread_loop_unlock(pw->main_loop);
@@ -951,6 +969,11 @@ static int snd_pcm_pipewire_open(snd_pcm_t **pcmp, const char *name,
 	pw->io.poll_fd = pw->fd;
 	pw->io.poll_events = POLLIN;
 	pw->io.mmap_rw = 1;
+#ifdef SND_PCM_IOPLUG_FLAG_BOUNDARY_WA
+	pw->io.flags = SND_PCM_IOPLUG_FLAG_BOUNDARY_WA;
+#else
+#warning hw_ptr updates of buffer_size will not be recognized by the ALSA library. Consider to update your ALSA library.
+#endif
 
 	if ((err = snd_pcm_ioplug_create(&pw->io, name, stream, mode)) < 0)
 		goto error;
@@ -965,7 +988,9 @@ static int snd_pcm_pipewire_open(snd_pcm_t **pcmp, const char *name,
 
 	return 0;
 
-      error:
+error:
+	if (props)
+		pw_properties_free(props);
 	snd_pcm_pipewire_free(pw);
 	return err;
 }
@@ -1059,7 +1084,7 @@ SND_PCM_PLUGIN_DEFINE_FUNC(pipewire)
 		return -EINVAL;
 	}
 
-	err = snd_pcm_pipewire_open(pcmp, name, node_name, playback_node,
+	err = snd_pcm_pipewire_open(pcmp, name, node_name, server_name, playback_node,
 			capture_node, stream, mode, flags, rate, format,
 			channels, period_bytes);
 

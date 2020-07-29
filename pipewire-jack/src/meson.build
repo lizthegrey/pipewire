@@ -20,15 +20,17 @@ jack_dep = dependency('jack', version : '>= 1.9.10', required : false)
 libjack_path = get_option('libjack-path')
 if libjack_path == ''
   libjack_path = join_paths(modules_install_dir, 'jack')
+  libjack_path_dlopen = join_paths(modules_install_dir_dlopen, 'jack')
+else
+  libjack_path_dlopen = libjack_path
 endif
 
 tools_config = configuration_data()
-tools_config.set('LIBJACK_PATH', libjack_path)
+tools_config.set('LIBJACK_PATH', libjack_path_dlopen)
 
 configure_file(input : 'pw-jack.in',
                output : 'pw-jack',
                configuration : tools_config,
-               install: true,
                install_dir : pipewire_bindir)
 
 pipewire_jack = shared_library('jack',
@@ -68,7 +70,8 @@ if sdl_dep.found()
   executable('video-dsp-play',
     '../examples/video-dsp-play.c',
     c_args : [ '-D_GNU_SOURCE' ],
-    install: false,
+    install : installed_tests_enabled,
+    install_dir : join_paths(installed_tests_execdir, 'examples', 'jack'),
     dependencies : [jack_dep, sdl_dep, mathlib],
     link_with: pipewire_jack,
   )

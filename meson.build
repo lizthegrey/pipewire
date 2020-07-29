@@ -1,7 +1,7 @@
 project('pipewire', ['c' ],
-  version : '0.3.5',
+  version : '0.3.8',
   license : 'MIT',
-  meson_version : '>= 0.50.0',
+  meson_version : '>= 0.49.0',
   default_options : [ 'warning_level=3',
                       'c_std=gnu99',
                       'buildtype=debugoptimized' ])
@@ -30,12 +30,30 @@ prefix = get_option('prefix')
 pipewire_bindir = join_paths(prefix, get_option('bindir'))
 pipewire_datadir = join_paths(prefix, get_option('datadir'))
 pipewire_libdir = join_paths(prefix, get_option('libdir'))
+pipewire_libexecdir = join_paths(prefix, get_option('libexecdir'))
 pipewire_localedir = join_paths(prefix, get_option('localedir'))
 pipewire_sysconfdir = join_paths(prefix, get_option('sysconfdir'))
 
 pipewire_configdir = join_paths(pipewire_sysconfdir, 'pipewire')
 modules_install_dir = join_paths(pipewire_libdir, pipewire_name)
+
+if host_machine.system() == 'linux'
+  # glibc ld.so interprets ${LIB} in a library loading path with an
+  # appropriate value for the current architecture, typically something
+  # like lib, lib64 or lib/x86_64-linux-gnu.
+  # This allows the same pw-pulse script to work for both 32- and 64-bit
+  # applications on biarch/multiarch distributions, by setting something
+  # like LD_LIBRARY_PATH='/usr/${LIB}/pipewire-0.3/pulse'.
+  # Note that ${LIB} is a special token expanded by the runtime linker,
+  # not an environment variable, and must be passed through literally.
+  modules_install_dir_dlopen = join_paths(prefix, '${LIB}', pipewire_name)
+else
+  modules_install_dir_dlopen = modules_install_dir
+endif
+
 spa_plugindir = join_paths(pipewire_libdir, spa_name)
+
+alsadatadir = join_paths(pipewire_datadir, 'alsa-card-profile', 'mixer')
 
 pipewire_headers_dir = join_paths(pipewire_name, 'pipewire')
 
@@ -49,7 +67,6 @@ cc = meson.get_compiler('c')
 if cc.get_id() == 'gcc'
   add_global_arguments('-fvisibility=hidden',
 			'-Wsign-compare',
-			'-Wimplicit-fallthrough',
 			'-Wpointer-arith',
 			'-Wformat',
 			'-Wformat-security',
@@ -67,7 +84,6 @@ if cc.get_id() == 'gcc'
 			language : 'c')
   add_global_arguments('-fvisibility=hidden',
 			'-Wsign-compare',
-			'-Wimplicit-fallthrough',
 			'-Wpointer-arith',
 			'-Wformat',
 			'-Wformat-security',
@@ -80,6 +96,12 @@ if cc.get_id() == 'gcc'
 			'-Wno-pedantic',
 			'-Wunused-result',
 			language : 'cpp')
+  # warn on implicit fall-through if supported by compiler (gcc >= 7.x)
+  gcc_major_version = cc.version().split('.')[0]
+  if(gcc_major_version.to_int() >= 7)
+    add_global_arguments('-Wimplicit-fallthrough', language : 'c')
+    add_global_arguments('-Wimplicit-fallthrough', language : 'cpp')
+  endif
 endif
 
 sse_args = '-msse'
@@ -159,6 +181,8 @@ cdata.set('VERSION', '"@0@"'.format(pipewire_version))
 cdata.set('PLUGINDIR', '"@0@"'.format(spa_plugindir))
 # FIXME: --with-memory-alignment],[8,N,malloc,pagesize (default is 32)]) option
 cdata.set('MEMORY_ALIGNMENT_MALLOC', 1)
+cdata.set_quoted('PA_ALSA_PATHS_DIR', join_paths(alsadatadir, 'paths'))
+cdata.set_quoted('PA_ALSA_PROFILE_SETS_DIR', join_paths(alsadatadir, 'profile-sets'))
 
 
 check_headers = [['dlfcn.h','HAVE_DLFCN_H'],
@@ -231,6 +255,15 @@ if get_option('systemd')
   endif
 endif
 
+if get_option('bluez5')
+  if get_option('bluez5-backend-native')
+    cdata.set('HAVE_BLUEZ_5_BACKEND_NATIVE', 1)
+  endif
+  if get_option('bluez5-backend-ofono')
+    cdata.set('HAVE_BLUEZ_5_BACKEND_OFONO', 1)
+  endif
+endif
+
 configure_file(input : 'config.h.meson',
   output : 'config.h',
   configuration : cdata)
@@ -268,7 +301,7 @@ if get_option('gstreamer')
   gobject_dep = dependency('gobject-2.0')
   gmodule_dep = dependency('gmodule-2.0')
   gio_dep = [dependency('gio-2.0'), dependency('gio-unix-2.0')]
-  gst_dep = [dependency('gstreamer-1.0'),
+  gst_dep = [dependency('gstreamer-1.0', version : '>= 1.10.0'),
              dependency('gstreamer-plugins-base-1.0'),
              dependency('gstreamer-video-1.0'),
              dependency('gstreamer-audio-1.0'),
@@ -281,8 +314,13 @@ epoll_shim_dep = (build_machine.system() == 'freebsd'
     : dependency('', required: false))
 
 alsa_dep = (get_option('pipewire-alsa')
-    ? dependency('alsa')
+    ? dependency('alsa', version : '>=1.1.7')
     : dependency('', required: false))
+
+installed_tests_metadir = join_paths(pipewire_datadir, 'installed-tests', pipewire_name)
+installed_tests_execdir = join_paths(pipewire_libexecdir, 'installed-tests', pipewire_name)
+installed_tests_enabled = get_option('installed_tests')
+installed_tests_template = files('template.test.in')
 
 subdir('spa')
 subdir('src')

@@ -35,7 +35,9 @@ static int spa_alsa_open(struct state *state)
 			   state->stream,
 			   SND_PCM_NONBLOCK |
 			   SND_PCM_NO_AUTO_RESAMPLE |
-			   SND_PCM_NO_AUTO_CHANNELS | SND_PCM_NO_AUTO_FORMAT), "%s: open failed", props->device);
+			   SND_PCM_NO_AUTO_CHANNELS | SND_PCM_NO_AUTO_FORMAT), "'%s': %s open failed",
+			props->device,
+			state->stream == SND_PCM_STREAM_CAPTURE ? "capture" : "playback");
 
 	if ((err = spa_system_timerfd_create(state->data_system,
 			CLOCK_MONOTONIC, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK)) < 0)
@@ -73,6 +75,8 @@ int spa_alsa_close(struct state *state)
 
 	spa_log_debug(state->log, NAME" %p: Device '%s' closing", state, state->props.device);
 	CHECK(snd_pcm_close(state->hndl), "%s: close failed", state->props.device);
+
+	CHECK(snd_output_close(state->output), "output close failed");
 
 	spa_system_close(state->data_system, state->timerfd);
 	state->opened = false;
@@ -112,12 +116,13 @@ static const struct format_info format_info[] = {
 	{ SPA_AUDIO_FORMAT_F64_BE, SPA_AUDIO_FORMAT_F64P, SND_PCM_FORMAT_FLOAT64_BE},
 };
 
-static snd_pcm_format_t spa_format_to_alsa(uint32_t format)
+static snd_pcm_format_t spa_format_to_alsa(uint32_t format, bool *planar)
 {
 	size_t i;
 
 	for (i = 0; i < SPA_N_ELEMENTS(format_info); i++) {
-		if (format_info[i].spa_format == format)
+		*planar = format_info[i].spa_pformat == format;
+		if (format_info[i].spa_format == format || *planar)
 			return format_info[i].format;
 	}
 	return SND_PCM_FORMAT_UNKNOWN;
@@ -185,6 +190,25 @@ static const struct def_mask default_layouts[] = {
 	{ 6, _M(FL) | _M(FR) | _M(RL) |_M(RR) | _M(FC) | _M(LFE) },
 	{ 7, _M(FL) | _M(FR) | _M(RL) |_M(RR) | _M(SL) | _M(SR) | _M(FC) },
 	{ 8, _M(FL) | _M(FR) | _M(RL) |_M(RR) | _M(SL) | _M(SR) | _M(FC) | _M(LFE) },
+};
+
+#define _C(ch)	(SPA_AUDIO_CHANNEL_ ##ch)
+
+struct def_map {
+	uint32_t channels;
+	uint32_t pos[SPA_AUDIO_MAX_CHANNELS];
+};
+
+static const struct def_map default_map[] = {
+	{ 0, { 0, } } ,
+	{ 1, { _C(MONO), } },
+	{ 2, { _C(FL), _C(FR), } },
+	{ 3, { _C(FL), _C(FR), _C(LFE) } },
+	{ 4, { _C(FL), _C(FR), _C(RL), _C(RR), } },
+	{ 5, { _C(FL), _C(FR), _C(RL), _C(RR), _C(FC) } },
+	{ 6, { _C(FL), _C(FR), _C(RL), _C(RR), _C(FC), _C(LFE), } },
+	{ 7, { _C(FL), _C(FR), _C(RL), _C(RR), _C(FC), _C(SL), _C(SR), } },
+	{ 8, { _C(FL), _C(FR), _C(RL), _C(RR), _C(FC), _C(LFE), _C(SL), _C(SR), } },
 };
 
 static enum spa_audio_channel chmap_position_to_channel(enum snd_pcm_chmap_position pos)
@@ -334,6 +358,14 @@ spa_alsa_enum_format(struct state *state, int seq, uint32_t start, uint32_t num,
 
 	CHECK(snd_pcm_hw_params_get_channels_min(params, &min), "get_channels_min");
 	CHECK(snd_pcm_hw_params_get_channels_max(params, &max), "get_channels_max");
+	spa_log_debug(state->log, "channels (%d %d)", min, max);
+
+	if (state->default_channels != 0) {
+		if (min < state->default_channels)
+			min = state->default_channels;
+		if (max > state->default_channels)
+			max = state->default_channels;
+	}
 
 	spa_pod_builder_prop(&b, SPA_FORMAT_AUDIO_channels, 0);
 
@@ -341,13 +373,20 @@ spa_alsa_enum_format(struct state *state, int seq, uint32_t start, uint32_t num,
 		uint32_t channel;
 		snd_pcm_chmap_t* map;
 
+skip_channels:
 		if (maps[result.index] == NULL) {
 			snd_pcm_free_chmaps(maps);
 			goto enum_end;
 		}
 		map = &maps[result.index]->map;
 
-		spa_log_debug(state->log, "map %d channels", map->channels);
+		spa_log_debug(state->log, "map %d channels (%d %d)", map->channels, min, max);
+
+		if (map->channels < min || map->channels > max) {
+			result.index = result.next++;
+			goto skip_channels;
+		}
+
 		sanitize_map(map);
 		spa_pod_builder_int(&b, map->channels);
 
@@ -375,6 +414,17 @@ spa_alsa_enum_format(struct state *state, int seq, uint32_t start, uint32_t num,
 			choice->body.type = SPA_CHOICE_Range;
 		}
 		spa_pod_builder_pop(&b, &f[1]);
+
+		if (min == max && min <= 8) {
+			const struct def_map *map = &default_map[min];
+			spa_pod_builder_prop(&b, SPA_FORMAT_AUDIO_position, 0);
+			spa_pod_builder_push_array(&b, &f[1]);
+			for (j = 0; j < map->channels; j++) {
+				spa_log_debug(state->log, NAME" %p: position %zd %d", state, j, map->pos[j]);
+				spa_pod_builder_id(&b, map->pos[j]);
+			}
+			spa_pod_builder_pop(&b, &f[1]);
+		}
 	}
 
 	fmt = spa_pod_builder_pop(&b, &f[0]);
@@ -404,7 +454,7 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 	struct spa_audio_info_raw *info = &fmt->info.raw;
 	snd_pcm_t *hndl;
 	unsigned int periods;
-	bool match = true;
+	bool match = true, planar;
 
 	if ((err = spa_alsa_open(state)) < 0)
 		return err;
@@ -414,24 +464,29 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 	snd_pcm_hw_params_alloca(&params);
 	/* choose all parameters */
 	CHECK(snd_pcm_hw_params_any(hndl, params), "Broken configuration for playback: no configurations available");
-	/* set hardware resampling */
+	/* set hardware resampling, no resample */
 	CHECK(snd_pcm_hw_params_set_rate_resample(hndl, params, 0), "set_rate_resample");
-	/* set the interleaved read/write format */
-	CHECK(snd_pcm_hw_params_set_access(hndl, params, SND_PCM_ACCESS_MMAP_INTERLEAVED), "set_access");
+
+	/* get format info */
+	format = spa_format_to_alsa(info->format, &planar);
+	if (format == SND_PCM_FORMAT_UNKNOWN) {
+		spa_log_warn(state->log, NAME" %p: unknown format %u", state, info->format);
+		return -EINVAL;
+	}
+
+	/* set the interleaved/planar read/write format */
+	CHECK(snd_pcm_hw_params_set_access(hndl, params,
+				planar ? SND_PCM_ACCESS_MMAP_NONINTERLEAVED
+				: SND_PCM_ACCESS_MMAP_INTERLEAVED), "set_access");
 
 	/* disable ALSA wakeups, we use a timer */
 	if (snd_pcm_hw_params_can_disable_period_wakeup(params))
 		CHECK(snd_pcm_hw_params_set_period_wakeup(hndl, params, 0), "set_period_wakeup");
 
 	/* set the sample format */
-	format = spa_format_to_alsa(info->format);
-	if (format == SND_PCM_FORMAT_UNKNOWN) {
-		spa_log_warn(state->log, NAME" %p: unknown format %u", state, info->format);
-		return -EINVAL;
-	}
-
-	spa_log_debug(state->log, NAME" %p: Stream parameters are %iHz, %s, %i channels",
-			state, info->rate, snd_pcm_format_name(format), info->channels);
+	spa_log_debug(state->log, NAME" %p: Stream parameters are %iHz, %s %s, %i channels",
+			state, info->rate, snd_pcm_format_name(format),
+			planar ? "planar" : "interleaved", info->channels);
 	CHECK(snd_pcm_hw_params_set_format(hndl, params, format), "set_format");
 
 	/* set the count of channels */
@@ -461,7 +516,12 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 	state->format = format;
 	state->channels = info->channels;
 	state->rate = info->rate;
-	state->frame_size = info->channels * (snd_pcm_format_physical_width(format) / 8);
+	state->frame_size = snd_pcm_format_physical_width(format) / 8;
+	state->blocks = 1;
+	if (planar)
+		state->blocks *= info->channels;
+	else
+		state->frame_size *= info->channels;
 
 	dir = 0;
 	period_size = 1024;
@@ -471,12 +531,13 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 	state->period_frames = period_size;
 	periods = state->buffer_frames / state->period_frames;
 
-	spa_log_info(state->log, NAME" %s (%s): format:%s rate:%d channels:%d "
+	spa_log_info(state->log, NAME" %s (%s): format:%s %s rate:%d channels:%d "
 			"buffer frames %lu, period frames %lu, periods %u, frame_size %zd",
 			state->props.device,
 			state->stream == SND_PCM_STREAM_CAPTURE ? "capture" : "playback",
-			snd_pcm_format_name(state->format), state->rate, state->channels,
-			state->buffer_frames, state->period_frames, periods, state->frame_size);
+			snd_pcm_format_name(state->format), planar ? "planar" : "interleaved",
+			state->rate, state->channels, state->buffer_frames, state->period_frames,
+			periods, state->frame_size);
 
 	/* write the parameters to device */
 	CHECK(snd_pcm_hw_params(hndl, params), "set_hw_params");
@@ -627,8 +688,8 @@ static int get_status(struct state *state, snd_pcm_uframes_t *delay, snd_pcm_ufr
 
 	*target = state->last_threshold;
 
-	if (state->matching && state->rate_match) {
-		state->delay = state->rate_match->delay;
+	if (state->resample && state->rate_match) {
+		state->delay = state->rate_match->delay * 2;
 		state->read_size = state->rate_match->size;
 		/* We try to compensate for the latency introduced by rate matching
 		 * by moving a little closer to the device read/write pointers.
@@ -781,13 +842,10 @@ again:
 		size_t n_bytes, n_frames;
 		struct buffer *b;
 		struct spa_data *d;
-		uint32_t index, offs, avail, size, maxsize, l0, l1;
+		uint32_t i, index, offs, avail, size, maxsize, l0, l1;
 
 		b = spa_list_first(&state->ready, struct buffer, link);
 		d = b->buf->datas;
-
-		dst = SPA_MEMBER(my_areas[0].addr, off * state->frame_size, uint8_t);
-		src = d[0].data;
 
 		size = d[0].chunk->size;
 		maxsize = d[0].maxsize;
@@ -803,10 +861,14 @@ again:
 		l0 = SPA_MIN(n_bytes, maxsize - offs);
 		l1 = n_bytes - l0;
 
-		spa_memcpy(dst, src + offs, l0);
-		if (SPA_UNLIKELY(l1 > 0))
-			spa_memcpy(dst + l0, src, l1);
+		for (i = 0; i < b->buf->n_datas; i++) {
+			dst = SPA_MEMBER(my_areas[i].addr, off * state->frame_size, uint8_t);
+			src = d[i].data;
 
+			spa_memcpy(dst, src + offs, l0);
+			if (SPA_UNLIKELY(l1 > 0))
+				spa_memcpy(dst + l0, src, l1);
+		}
 		state->ready_offset += n_bytes;
 
 		if (state->ready_offset >= size) {
@@ -890,7 +952,7 @@ push_frames(struct state *state,
 		size_t n_bytes, left;
 		struct buffer *b;
 		struct spa_data *d;
-		uint32_t avail, l0, l1;
+		uint32_t i, avail, l0, l1;
 
 		b = spa_list_first(&state->free, struct buffer, link);
 		spa_list_remove(&b->link);
@@ -912,18 +974,23 @@ push_frames(struct state *state,
 			l0 = SPA_MIN(n_bytes, left * state->frame_size);
 			l1 = n_bytes - l0;
 
-			src = SPA_MEMBER(my_areas[0].addr, offset * state->frame_size, uint8_t);
-			spa_memcpy(d[0].data, src, l0);
-			if (l1 > 0)
-				spa_memcpy(SPA_MEMBER(d[0].data, l0, void), my_areas[0].addr, l1);
+			for (i = 0; i < b->buf->n_datas; i++) {
+				src = SPA_MEMBER(my_areas[i].addr, offset * state->frame_size, uint8_t);
+				spa_memcpy(d[i].data, src, l0);
+				if (l1 > 0)
+					spa_memcpy(SPA_MEMBER(d[i].data, l0, void), my_areas[i].addr, l1);
+				d[i].chunk->offset = 0;
+				d[i].chunk->size = n_bytes;
+				d[i].chunk->stride = state->frame_size;
+			}
 		} else {
-			memset(d[0].data, 0, n_bytes);
+			for (i = 0; i < b->buf->n_datas; i++) {
+				memset(d[i].data, 0, n_bytes);
+				d[i].chunk->offset = 0;
+				d[i].chunk->size = n_bytes;
+				d[i].chunk->stride = state->frame_size;
+			}
 		}
-
-		d[0].chunk->offset = 0;
-		d[0].chunk->size = n_bytes;
-		d[0].chunk->stride = state->frame_size;
-
 		spa_list_append(&state->ready, &b->link);
 	}
 	return total_frames - keep;
@@ -992,6 +1059,7 @@ int spa_alsa_read(struct state *state, snd_pcm_uframes_t silence)
 	if (frames == 0)
 		frames = state->threshold + state->delay;
 
+
 	to_read = state->buffer_frames;
 	if ((res = snd_pcm_mmap_begin(hndl, &my_areas, &offset, &to_read)) < 0) {
 		spa_log_error(state->log, NAME" %p: snd_pcm_mmap_begin error: %s",
@@ -999,12 +1067,12 @@ int spa_alsa_read(struct state *state, snd_pcm_uframes_t silence)
 		return res;
 	}
 
-	spa_log_trace_fp(state->log, NAME" %p: begin %ld %ld %ld %d", state,
+	spa_log_trace_fp(state->log, NAME" %p: begin offs:%ld frames:%ld to_read:%ld thres:%d", state,
 			offset, frames, to_read, state->threshold);
 
 	read = push_frames(state, my_areas, offset, frames, state->delay);
 
-	spa_log_trace_fp(state->log, NAME" %p: commit %ld %ld %"PRIi64, state,
+	spa_log_trace_fp(state->log, NAME" %p: commit offs:%ld read:%ld count:%"PRIi64, state,
 			offset, read, state->sample_count);
 	total_read += read;
 
@@ -1192,15 +1260,16 @@ int spa_alsa_start(struct state *state)
 		state->rate_denom = state->rate;
 	}
 
+	state->resample = (state->rate != state->rate_denom) || state->matching;
 	state->threshold = (state->duration * state->rate + state->rate_denom-1) / state->rate_denom;
 	state->last_threshold = state->threshold;
 
 	init_loop(state);
 	state->safety = 0.0;
 
-	spa_log_debug(state->log, NAME" %p: start %d duration:%d rate:%d follower:%d match:%d",
+	spa_log_debug(state->log, NAME" %p: start %d duration:%d rate:%d follower:%d match:%d resample:%d",
 			state, state->threshold, state->duration, state->rate_denom,
-			state->following, state->matching);
+			state->following, state->matching, state->resample);
 
 	CHECK(set_swparams(state), "swparams");
 	if (SPA_UNLIKELY(spa_log_level_enabled(state->log, SPA_LOG_LEVEL_DEBUG)))

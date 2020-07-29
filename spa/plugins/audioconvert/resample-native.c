@@ -146,6 +146,7 @@ static const struct resample_info *find_resample_info(uint32_t format, uint32_t 
 
 static void impl_native_free(struct resample *r)
 {
+	spa_log_debug(r->log, "native %p: free", r);
 	free(r->data);
 	r->data = NULL;
 }
@@ -257,13 +258,13 @@ static void impl_native_process(struct resample *r,
 		int skip = in - hist;
 		/* we are past the history and can now work on the new
 		 * input data */
-		in = *in_len - skip;
+		in = *in_len;
 		data->func(r, src, skip, &in, dst, out, out_len);
 
 		spa_log_trace_fp(r->log, "native %p: in:%d/%d out %d/%d",
 				r, *in_len, in, *out_len, out);
 
-		remain = *in_len - in;
+		remain = *in_len - skip - in;
 		if (remain > 0 && remain < n_taps) {
 			/* not enough input data remaining for more output,
 			 * copy to history */

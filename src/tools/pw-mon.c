@@ -158,7 +158,8 @@ static void print_params(struct proxy_data *data, char mark)
 
 	printf("%c\tparams:\n", mark);
 	spa_list_for_each(p, &data->param_list, link) {
-		printf("%c\t  id:%u\n", p->changed ? mark : ' ', p->id);
+		printf("%c\t  id:%u (%s)\n", p->changed ? mark : ' ', p->id,
+			spa_debug_type_find_name(spa_type_param, p->id));
 		if (spa_pod_is_object_type(p->param, SPA_TYPE_OBJECT_Format))
 			spa_debug_format(10, NULL, p->param);
 		else
@@ -541,6 +542,13 @@ static const struct pw_device_events device_events = {
 };
 
 static void
+removed_proxy (void *data)
+{
+        struct proxy_data *pd = data;
+	pw_proxy_destroy(pd->proxy);
+}
+
+static void
 destroy_proxy (void *data)
 {
         struct proxy_data *pd = data;
@@ -559,6 +567,7 @@ destroy_proxy (void *data)
 
 static const struct pw_proxy_events proxy_events = {
 	PW_VERSION_PROXY_EVENTS,
+	.removed = removed_proxy,
 	.destroy = destroy_proxy,
 };
 
@@ -764,8 +773,10 @@ int main(int argc, char *argv[])
 
 	pw_main_loop_run(data.loop);
 
+	pw_proxy_destroy((struct pw_proxy*)data.registry);
 	pw_context_destroy(data.context);
 	pw_main_loop_destroy(data.loop);
+	pw_deinit();
 
 	return 0;
 }

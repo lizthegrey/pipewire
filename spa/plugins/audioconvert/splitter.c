@@ -52,9 +52,9 @@
 
 #define MAX_SAMPLES	8192
 #define MAX_ALIGN	16
-#define MAX_BUFFERS	64
-#define MAX_DATAS	32
-#define MAX_PORTS	128
+#define MAX_BUFFERS	32
+#define MAX_DATAS	64
+#define MAX_PORTS	64
 
 struct buffer {
 	uint32_t id;
@@ -116,7 +116,7 @@ struct impl {
 
 	bool have_profile;
 
-	float empty[MAX_SAMPLES*2 + MAX_ALIGN];
+	float empty[MAX_SAMPLES + MAX_ALIGN];
 };
 
 #define CHECK_OUT_PORT(this,d,p)	((d) == SPA_DIRECTION_OUTPUT && (p) < this->port_count)
@@ -154,7 +154,8 @@ static int init_port(struct impl *this, enum spa_direction direction,
 	port->direction = direction;
 	port->id = port_id;
 
-	snprintf(port->position, 7, "%s", rindex(spa_type_audio_channel[position].name, ':')+1);
+	snprintf(port->position, 7, "%s",
+			spa_debug_type_short_name(spa_type_audio_channel[position].name));
 
 
 	port->info_all = SPA_PORT_CHANGE_MASK_FLAGS |

@@ -302,6 +302,7 @@ static void client_free(void *data)
 	struct client_data *this = data;
 	struct pw_impl_client *client = this->client;
 
+	pw_log_debug(NAME" %p: free", this);
 	spa_list_remove(&this->protocol_link);
 
 	if (this->source)
@@ -927,6 +928,8 @@ static void destroy_server(struct pw_protocol_server *server)
 	struct server *s = SPA_CONTAINER_OF(server, struct server, this);
 	struct client_data *data, *tmp;
 
+	pw_log_debug(NAME" %p: server %p", s->this.protocol, s);
+
 	spa_list_remove(&server->link);
 	spa_hook_remove(&s->hook);
 
@@ -975,7 +978,7 @@ static const struct spa_loop_control_hooks impl_hooks = {
 };
 
 static const char *
-get_name(const struct spa_dict *props)
+get_server_name(const struct spa_dict *props)
 {
 	const char *name = NULL;
 
@@ -984,7 +987,7 @@ get_name(const struct spa_dict *props)
 	if (name == NULL)
 		name = getenv("PIPEWIRE_CORE");
 	if (name == NULL)
-		name = "pipewire-0";
+		name = PW_DEFAULT_REMOTE;
 	return name;
 }
 
@@ -1032,7 +1035,7 @@ impl_add_server(struct pw_protocol *protocol,
 
 	this = &s->this;
 
-	name = get_name(props);
+	name = get_server_name(props);
 
 	if ((res = init_socket_name(s, name)) < 0)
 		goto error;
@@ -1140,11 +1143,12 @@ static const struct pw_impl_module_events module_events = {
 
 static int need_server(struct pw_context *context, const struct spa_dict *props)
 {
-	const char *val;
+	const char *val = NULL;
 
-	val = getenv("PIPEWIRE_DAEMON");
-	if (val == NULL)
+	if (props)
 		val = spa_dict_lookup(props, PW_KEY_CORE_DAEMON);
+	if (val == NULL)
+		val = getenv("PIPEWIRE_DAEMON");
 	if (val && pw_properties_parse_bool(val))
 		return 1;
 	return 0;

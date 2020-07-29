@@ -98,6 +98,7 @@ extern "C" {
 									  *  playback of midi */
 #define SPA_NAME_API_ALSA_SEQ_BRIDGE	"api.alsa.seq.bridge"		/**< an alsa Node interface for
 									  *  bridging midi ports */
+#define SPA_NAME_API_ALSA_ACP_DEVICE	"api.alsa.acp.device"		/**< an alsa ACP Device interface */
 
 /** keys for bluez5 factory names */
 #define SPA_NAME_API_BLUEZ5_ENUM_DBUS	"api.bluez5.enum.dbus"		/**< a dbus Device interface */
@@ -112,6 +113,13 @@ extern "C" {
 #define SPA_NAME_API_V4L2_DEVICE	"api.v4l2.device"		/**< a v4l2 Device interface */
 #define SPA_NAME_API_V4L2_SOURCE	"api.v4l2.source"		/**< a v4l2 Node interface for
 									  *  capturing */
+
+/** keys for libcamera factory names */
+#define SPA_NAME_API_LIBCAMERA_ENUM_CLIENT	"api.libcamera.enum.client"	/**< a libcamera client Device interface */
+#define SPA_NAME_API_LIBCAMERA_DEVICE		"api.libcamera.device"		/**< a libcamera Device interface */
+#define SPA_NAME_API_LIBCAMERA_SOURCE		"api.libcamera.source"		/**< a libcamera Node interface for
+									  *  capturing */
+
 /** keys for jack factory names */
 #define SPA_NAME_API_JACK_DEVICE	"api.jack.device"		/**< a jack device. This is a
 									  *  client connected to a server */

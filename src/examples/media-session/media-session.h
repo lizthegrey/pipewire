@@ -43,6 +43,7 @@ struct sm_object_events {
 
 	void (*update) (void *data);
 	void (*destroy) (void *data);
+	void (*free) (void *data);
 };
 
 struct sm_object_methods {
@@ -152,11 +153,18 @@ struct sm_port {
 	struct sm_object obj;
 
 	enum pw_direction direction;
+#define SM_PORT_TYPE_UNKNOWN	0
+#define SM_PORT_TYPE_DSP_AUDIO	1
+#define SM_PORT_TYPE_DSP_MIDI	2
+	uint32_t type;
+	uint32_t channel;
 	struct sm_node *node;
 	struct spa_list link;		/**< link in node port_list */
 
 #define SM_PORT_CHANGE_MASK_INFO	(SM_OBJECT_CHANGE_MASK_LAST<<0)
 	struct pw_port_info *info;
+
+	unsigned int visited:1;
 };
 
 struct sm_session {
@@ -235,6 +243,7 @@ struct sm_media_session {
 	struct pw_context *context;
 
 	struct spa_dbus_connection *dbus_connection;
+	struct pw_metadata *metadata;
 
 	struct pw_core_info *info;
 };
@@ -249,6 +258,10 @@ int sm_media_session_sync(struct sm_media_session *sess,
 
 struct sm_object *sm_media_session_find_object(struct sm_media_session *sess, uint32_t id);
 int sm_media_session_destroy_object(struct sm_media_session *sess, uint32_t id);
+
+int sm_media_session_for_each_object(struct sm_media_session *sess,
+                            int (*callback) (void *data, struct sm_object *object),
+                            void *data);
 
 int sm_media_session_schedule_rescan(struct sm_media_session *sess);
 
@@ -269,6 +282,8 @@ struct sm_node *sm_media_session_create_node(struct sm_media_session *sess,
 		const char *factory_name, const struct spa_dict *props);
 
 int sm_media_session_create_links(struct sm_media_session *sess,
+		const struct spa_dict *dict);
+int sm_media_session_remove_links(struct sm_media_session *sess,
 		const struct spa_dict *dict);
 
 #ifdef __cplusplus

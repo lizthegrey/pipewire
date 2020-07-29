@@ -56,6 +56,7 @@ struct data {
 	struct pw_map vars;
 	unsigned int interactive:1;
 	unsigned int monitoring:1;
+	unsigned int quit:1;
 };
 
 struct global {
@@ -433,6 +434,7 @@ static void on_core_destroy(void *_data)
 
 	pw_map_remove(&data->vars, rd->id);
 	pw_map_for_each(&rd->globals, destroy_global, rd);
+	pw_map_clear(&rd->globals);
 
 	if (data->current == rd)
 		data->current = NULL;
@@ -443,6 +445,12 @@ static const struct pw_proxy_events proxy_core_events = {
 	PW_VERSION_PROXY_EVENTS,
 	.destroy = on_core_destroy,
 };
+
+static void remote_data_free(struct remote_data *rd)
+{
+	pw_proxy_destroy((struct pw_proxy*)rd->registry);
+	pw_core_disconnect(rd->core);
+}
 
 static bool do_connect(struct data *data, const char *cmd, char *args, char **error)
 {
@@ -504,7 +512,8 @@ static bool do_disconnect(struct data *data, const char *cmd, char *args, char *
 			goto no_remote;
 
 	}
-	pw_core_disconnect(rd->core);
+	if (rd)
+		remote_data_free(rd);
 
 	if (data->current == NULL) {
 		if (spa_list_is_empty(&data->remotes)) {
@@ -884,7 +893,9 @@ static void client_event_permissions(void *object, uint32_t index,
 			fprintf(stdout, "  default:");
 		else
 			fprintf(stdout, "  %u:", permissions[i].id);
-		fprintf(stdout, " %08x\n", permissions[i].permissions);
+		fprintf(stdout, " %c%c%c\n", permissions[i].permissions & PW_PERM_R ? 'r' : '-',
+					  permissions[i].permissions & PW_PERM_W ? 'w' : '-',
+					  permissions[i].permissions & PW_PERM_X ? 'x' : '-');
 	}
 }
 
@@ -1091,6 +1102,13 @@ static const struct pw_endpoint_stream_events endpoint_stream_events = {
 };
 
 static void
+removed_proxy (void *data)
+{
+	struct proxy_data *pd = data;
+	pw_proxy_destroy(pd->proxy);
+}
+
+static void
 destroy_proxy (void *data)
 {
 	struct proxy_data *pd = data;
@@ -1108,6 +1126,7 @@ destroy_proxy (void *data)
 
 static const struct pw_proxy_events proxy_events = {
         PW_VERSION_PROXY_EVENTS,
+        .removed = removed_proxy,
         .destroy = destroy_proxy,
 };
 
@@ -1742,7 +1761,7 @@ children_of(struct remote_data *rd, uint32_t parent_id,
 			if (!count)
 				return 0;
 
-			*children = malloc(sizeof(*children) * count);
+			*children = malloc(sizeof(uint32_t) * count);
 			if (!*children)
 				return -1;
 		}
@@ -1777,10 +1796,6 @@ children_of(struct remote_data *rd, uint32_t parent_id,
 
 		}
 	}
-
-	if (!count)
-		return 0;
-
 	return count;
 }
 
@@ -2708,7 +2723,7 @@ static void do_input(void *data, int fd, uint32_t mask)
 
 	if (mask & SPA_IO_IN) {
 		while (true) {
-			r = read(fd, buf, sizeof(buf));
+			r = read(fd, buf, sizeof(buf)-1);
 			if (r < 0) {
 				if (errno == EAGAIN)
 					continue;
@@ -2742,6 +2757,7 @@ static void do_input(void *data, int fd, uint32_t mask)
 static void do_quit(void *data, int signal_number)
 {
 	struct data *d = data;
+	d->quit = true;
 	pw_main_loop_quit(d->loop);
 }
 
@@ -2764,6 +2780,7 @@ int main(int argc, char *argv[])
 	char *opt_remote = NULL;
 	char *error;
 	bool daemon = false;
+	struct remote_data *rd;
 	static const struct option long_options[] = {
 		{ "help",	no_argument,		 NULL, 'h' },
 		{ "version",	no_argument,		 NULL, 'V' },
@@ -2821,7 +2838,6 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 
-
 	if (optind == argc) {
 		data.interactive = true;
 
@@ -2846,14 +2862,18 @@ int main(int argc, char *argv[])
 			fprintf(stdout, "Error: \"%s\"\n", error);
 			free(error);
 		}
-		if (data.current) {
+		if (!data.quit && data.current) {
 			data.current->prompt_pending = pw_core_sync(data.current->core, 0, 0);
 			pw_main_loop_run(data.loop);
 		}
 	}
+	spa_list_consume(rd, &data.remotes, link)
+		remote_data_free(rd);
 
 	pw_context_destroy(data.context);
 	pw_main_loop_destroy(data.loop);
+	pw_map_clear(&data.vars);
+	pw_deinit();
 
 	return 0;
 }

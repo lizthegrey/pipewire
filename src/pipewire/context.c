@@ -358,9 +358,6 @@ void pw_context_destroy(struct pw_context *context)
 	spa_list_consume(core, &context->core_list, link)
 		pw_core_disconnect(core);
 
-	spa_list_consume(module, &context->module_list, link)
-		pw_impl_module_destroy(module);
-
 	spa_list_consume(node, &context->node_list, link)
 		pw_impl_node_destroy(node);
 
@@ -369,6 +366,9 @@ void pw_context_destroy(struct pw_context *context)
 
 	spa_list_consume(resource, &context->registry_resource_list, link)
 		pw_resource_destroy(resource);
+
+	spa_list_consume(module, &context->module_list, link)
+		pw_impl_module_destroy(module);
 
 	spa_list_consume(global, &context->global_list, link)
 		pw_global_destroy(global);
@@ -455,6 +455,14 @@ int pw_context_update_properties(struct pw_context *context, const struct spa_di
 	return changed;
 }
 
+static bool global_can_read(struct pw_context *context, struct pw_global *global)
+{
+	if (context->current_client &&
+	    !PW_PERM_IS_R(pw_global_get_permissions(global, context->current_client)))
+		return false;
+	return true;
+}
+
 SPA_EXPORT
 int pw_context_for_each_global(struct pw_context *context,
 			    int (*callback) (void *data, struct pw_global *global),
@@ -464,8 +472,7 @@ int pw_context_for_each_global(struct pw_context *context,
 	int res;
 
 	spa_list_for_each_safe(g, t, &context->global_list, link) {
-		if (context->current_client &&
-		    !PW_PERM_IS_R(pw_global_get_permissions(g, context->current_client)))
+		if (!global_can_read(context, g))
 			continue;
 		if ((res = callback(data, g)) != 0)
 			return res;
@@ -484,8 +491,7 @@ struct pw_global *pw_context_find_global(struct pw_context *context, uint32_t id
 		return NULL;
 	}
 
-	if (context->current_client &&
-	    !PW_PERM_IS_R(pw_global_get_permissions(global, context->current_client))) {
+	if (!global_can_read(context, global)) {
 		errno = EACCES;
 		return NULL;
 	}
@@ -528,8 +534,7 @@ struct pw_impl_port *pw_context_find_port(struct pw_context *context,
 		if (other_port->node == n)
 			continue;
 
-		if (context->current_client &&
-		    !PW_PERM_IS_R(pw_global_get_permissions(n->global, context->current_client)))
+		if (!global_can_read(context, n->global))
 			continue;
 
 		pw_log_debug(NAME" %p: node id:%d", context, n->global->id);
@@ -587,19 +592,25 @@ struct pw_impl_port *pw_context_find_port(struct pw_context *context,
 	return best;
 }
 
-int pw_context_debug_port_params(struct pw_context *this,
+SPA_PRINTF_FUNC(7, 8) int pw_context_debug_port_params(struct pw_context *this,
 		struct spa_node *node, enum spa_direction direction,
-		uint32_t port_id, uint32_t id, const char *debug, int err)
+		uint32_t port_id, uint32_t id, int err, const char *debug, ...)
 {
 	struct spa_pod_builder b = { 0 };
 	uint8_t buffer[4096];
 	uint32_t state;
 	struct spa_pod *param;
 	int res;
+	va_list args;
 
-	pw_log_error("params %s: %d:%d (%s) %s",
+	va_start(args, debug);
+	vsnprintf((char*)buffer, sizeof(buffer), debug, args);
+	va_end(args);
+
+	pw_log_error("params %s: %d:%d %s (%s)",
 			spa_debug_type_find_name(spa_type_param, id),
-			direction, port_id, debug, spa_strerror(err));
+			direction, port_id, spa_strerror(err), buffer);
+
 	if (err == -EBUSY)
 		return 0;
 
@@ -686,11 +697,14 @@ int pw_context_find_format(struct pw_context *context,
 						     input->direction, input->port_id,
 						     SPA_PARAM_EnumFormat, &iidx,
 						     filter, format, builder)) <= 0) {
-			if (res < 0)
+			if (res == -ENOENT || res == 0) {
+				pw_log_debug(NAME" %p: no input format filter, using output format: %s",
+						context, spa_strerror(res));
+				*format = filter;
+			} else {
 				*error = spa_aprintf("error input enum formats: %s", spa_strerror(res));
-			else
-				*error = spa_aprintf("no input formats");
-			goto error;
+				goto error;
+			}
 		}
 	} else if (out_state >= PW_IMPL_PORT_STATE_CONFIGURE && in_state > PW_IMPL_PORT_STATE_CONFIGURE) {
 		/* only output needs format */
@@ -712,11 +726,14 @@ int pw_context_find_format(struct pw_context *context,
 						     output->direction, output->port_id,
 						     SPA_PARAM_EnumFormat, &oidx,
 						     filter, format, builder)) <= 0) {
-			if (res < 0)
+			if (res == -ENOENT || res == 0) {
+				pw_log_debug(NAME" %p: no output format filter, using input format: %s",
+						context, spa_strerror(res));
+				*format = filter;
+			} else {
 				*error = spa_aprintf("error output enum formats: %s", spa_strerror(res));
-			else
-				*error = spa_aprintf("no output format");
-			goto error;
+				goto error;
+			}
 		}
 	} else if (in_state == PW_IMPL_PORT_STATE_CONFIGURE && out_state == PW_IMPL_PORT_STATE_CONFIGURE) {
 	      again:
@@ -727,15 +744,16 @@ int pw_context_find_format(struct pw_context *context,
 						     input->direction, input->port_id,
 						     SPA_PARAM_EnumFormat, &iidx,
 						     NULL, &filter, &fb)) != 1) {
-			if (res == 0 && iidx == 0) {
-				*error = spa_aprintf("no compatible formats");
+			if (res == -ENOENT) {
+				pw_log_debug(NAME" %p: no input filter", context);
+				filter = NULL;
+			} else {
+				if (res < 0)
+					*error = spa_aprintf("error input enum formats: %s", spa_strerror(res));
+				else
+					*error = spa_aprintf("no more input formats");
 				goto error;
 			}
-			if (res < 0)
-				*error = spa_aprintf("error input enum formats: %s", spa_strerror(res));
-			else
-				*error = spa_aprintf("no more input formats");
-			goto error;
 		}
 		pw_log_debug(NAME" %p: enum output %d with filter: %p", context, oidx, filter);
 		pw_log_format(SPA_LOG_LEVEL_DEBUG, filter);
@@ -744,7 +762,7 @@ int pw_context_find_format(struct pw_context *context,
 						     output->direction, output->port_id,
 						     SPA_PARAM_EnumFormat, &oidx,
 						     filter, format, builder)) != 1) {
-			if (res == 0) {
+			if (res == 0 && filter != NULL) {
 				oidx = 0;
 				goto again;
 			}
@@ -797,11 +815,18 @@ static int collect_nodes(struct pw_impl_node *driver)
 	spa_list_consume(n, &queue, sort_link) {
 		spa_list_remove(&n->sort_link);
 		pw_impl_node_set_driver(n, driver);
+		n->passive = true;
 
 		spa_list_for_each(p, &n->input_ports, link) {
 			spa_list_for_each(l, &p->links, input_link) {
 				t = l->output->node;
-				if (l->prepared && !t->visited && t->active) {
+				if (!l->passive)
+					driver->passive = n->passive = false;
+				else
+					pw_impl_link_prepare(l);
+				if (t->visited || !t->active)
+					continue;
+				if (l->prepared) {
 					t->visited = true;
 					spa_list_append(&queue, &t->sort_link);
 				}
@@ -810,7 +835,13 @@ static int collect_nodes(struct pw_impl_node *driver)
 		spa_list_for_each(p, &n->output_ports, link) {
 			spa_list_for_each(l, &p->links, output_link) {
 				t = l->input->node;
-				if (l->prepared && !t->visited && t->active) {
+				if (!l->passive)
+					driver->passive = n->passive = false;
+				else
+					pw_impl_link_prepare(l);
+				if (t->visited || !t->active)
+					continue;
+				if (l->prepared) {
 					t->visited = true;
 					spa_list_append(&queue, &t->sort_link);
 				}
@@ -847,7 +878,7 @@ int pw_context_recalc_graph(struct pw_context *context, const char *reason)
 
 		/* from now on we are only interested in active master nodes.
 		 * We're going to see if there are active followers. */
-		if (!n->master || !n->active)
+		if (!n->master || !n->active || n->passive)
 			continue;
 
 		/* first active master node is fallback */
@@ -907,7 +938,7 @@ int pw_context_recalc_graph(struct pw_context *context, const char *reason)
 			if (s == n)
 				continue;
 			if (s->active)
-				running = true;
+				running = !n->passive;
 			if (s->quantum_size > 0) {
 				if (min_quantum == 0 || s->quantum_size < min_quantum)
 					min_quantum = s->quantum_size;
@@ -930,8 +961,8 @@ int pw_context_recalc_graph(struct pw_context *context, const char *reason)
 			n->rt.position->clock.duration = quantum;
 		}
 
-		pw_log_debug(NAME" %p: master %p running:%d quantum:%u '%s'", context, n,
-				running, quantum, n->name);
+		pw_log_debug(NAME" %p: master %p running:%d passive:%d quantum:%u '%s'", context, n,
+				running, n->passive, quantum, n->name);
 
 		spa_list_for_each(s, &n->follower_list, follower_link) {
 			if (s == n)
@@ -1016,6 +1047,10 @@ struct spa_handle *pw_context_load_spa_handle(struct pw_context *context,
 SPA_EXPORT
 int pw_context_register_export_type(struct pw_context *context, struct pw_export_type *type)
 {
+	if (pw_context_find_export_type(context, type->type)) {
+		pw_log_warn("context %p: duplicate export type %s", context, type->type);
+		return -EEXIST;
+	}
 	pw_log_debug("context %p: Add export type %s to context", context, type->type);
 	spa_list_append(&context->export_list, &type->link);
 	return 0;

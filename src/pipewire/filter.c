@@ -57,6 +57,7 @@ struct buffer {
 	uint32_t id;
 #define BUFFER_FLAG_MAPPED	(1 << 0)
 #define BUFFER_FLAG_QUEUED	(1 << 1)
+#define BUFFER_FLAG_ADDED	(1 << 2)
 	uint32_t flags;
 };
 
@@ -140,7 +141,7 @@ struct filter {
 	struct pw_time time;
 
 	unsigned int disconnecting:1;
-	unsigned int free_proxy:1;
+	unsigned int disconnect_core:1;
 	unsigned int subscribe:1;
 	unsigned int draining:1;
 	unsigned int allow_mlock:1;
@@ -585,7 +586,8 @@ static void clear_buffers(struct port *port)
 	for (i = 0; i < port->n_buffers; i++) {
 		struct buffer *b = &port->buffers[i];
 
-		pw_filter_emit_remove_buffer(&impl->this, port->user_data, &b->this);
+		if (SPA_FLAG_IS_SET(b->flags, BUFFER_FLAG_ADDED))
+			pw_filter_emit_remove_buffer(&impl->this, port->user_data, &b->this);
 
 		if (SPA_FLAG_IS_SET(b->flags, BUFFER_FLAG_MAPPED)) {
 			for (j = 0; j < b->this.buffer->n_datas; j++) {
@@ -611,8 +613,8 @@ static int impl_port_set_param(void *object,
 	struct port *port;
 	int res;
 
-	if (impl->disconnecting)
-		return param == NULL ? 0 : -EIO;
+	if (impl->disconnecting && param != NULL)
+		return -EIO;
 
 	pw_log_debug(NAME" %p: param changed: %p %d", impl, param, impl->disconnecting);
 
@@ -625,7 +627,7 @@ static int impl_port_set_param(void *object,
 	if ((res = update_params(impl, port, id, &param, param ? 1 : 0)) < 0)
 		return res;
 
-	if (id == SPA_PARAM_Format && param == NULL)
+	if (id == SPA_PARAM_Format)
 		clear_buffers(port);
 
 	pw_filter_emit_param_changed(filter, port->user_data, id, param);
@@ -633,10 +635,7 @@ static int impl_port_set_param(void *object,
 	if (filter->state == PW_FILTER_STATE_ERROR)
 		return -EIO;
 
-	if (port)
-		emit_port_info(impl, port, false);
-	else
-		emit_node_info(impl, false);
+	emit_port_info(impl, port, false);
 
 	return res;
 }
@@ -653,8 +652,8 @@ static int impl_port_use_buffers(void *object,
 	int prot, res;
 	int size = 0;
 
-	if (impl->disconnecting)
-		return n_buffers == 0 ? 0 : -EIO;
+	if (impl->disconnecting && n_buffers > 0)
+		return -EIO;
 
 	if ((port = get_port(impl, direction, port_id)) == NULL)
 		return -EINVAL;
@@ -678,6 +677,7 @@ static int impl_port_use_buffers(void *object,
 				    d->type == SPA_DATA_DmaBuf) {
 					if ((res = map_data(impl, d, prot)) < 0)
 						return res;
+					SPA_FLAG_SET(b->flags, BUFFER_FLAG_MAPPED);
 				}
 				else if (d->data == NULL) {
 					pw_log_error(NAME" %p: invalid buffer mem", filter);
@@ -685,7 +685,6 @@ static int impl_port_use_buffers(void *object,
 				}
 				buf_size += d->maxsize;
 			}
-			SPA_FLAG_SET(b->flags, BUFFER_FLAG_MAPPED);
 
 			if (size > 0 && buf_size != size) {
 				pw_log_error(NAME" %p: invalid buffer size %d", filter, buf_size);
@@ -700,8 +699,6 @@ static int impl_port_use_buffers(void *object,
 	for (i = 0; i < n_buffers; i++) {
 		struct buffer *b = &port->buffers[i];
 
-		b->flags = 0;
-		b->id = i;
 		b->this.buffer = buffers[i];
 
 		if (port->direction == SPA_DIRECTION_OUTPUT) {
@@ -709,6 +706,7 @@ static int impl_port_use_buffers(void *object,
 			push_queue(port, &port->dequeued, b);
 		}
 
+		SPA_FLAG_SET(b->flags, BUFFER_FLAG_ADDED);
 		pw_filter_emit_add_buffer(filter, port->user_data, &b->this);
 	}
 
@@ -881,13 +879,20 @@ static const struct spa_node_methods impl_node = {
 	.process = impl_node_process,
 };
 
-static void proxy_destroy(void *_data)
+static void proxy_removed(void *_data)
 {
 	struct pw_filter *filter = _data;
-	filter->proxy = NULL;
+	pw_log_debug(NAME" %p: removed", filter);
 	spa_hook_remove(&filter->proxy_listener);
 	filter->node_id = SPA_ID_INVALID;
 	filter_set_state(filter, PW_FILTER_STATE_UNCONNECTED, NULL);
+}
+
+static void proxy_destroy(void *_data)
+{
+	struct pw_filter *filter = _data;
+	pw_log_debug(NAME" %p: destroy", filter);
+	proxy_removed(_data);
 }
 
 static void proxy_error(void *_data, int seq, int res, const char *message)
@@ -905,6 +910,7 @@ static void proxy_bound(void *_data, uint32_t global_id)
 
 static const struct pw_proxy_events proxy_events = {
 	PW_VERSION_PROXY_EVENTS,
+	.removed = proxy_removed,
 	.destroy = proxy_destroy,
 	.error = proxy_error,
 	.bound = proxy_bound,
@@ -914,9 +920,10 @@ static void on_core_error(void *_data, uint32_t id, int seq, int res, const char
 {
 	struct pw_filter *filter = _data;
 
-	pw_log_error(NAME" %p: error id:%u seq:%d res:%d (%s): %s", filter,
+	pw_log_debug(NAME" %p: error id:%u seq:%d res:%d (%s): %s", filter,
 			id, seq, res, spa_strerror(res), message);
-	if (id == 0) {
+
+	if (id == PW_ID_CORE && res == -EPIPE) {
 		filter_set_state(filter, PW_FILTER_STATE_UNCONNECTED, message);
 	}
 }
@@ -1031,11 +1038,14 @@ pw_filter_new_simple(struct pw_loop *loop,
 		return NULL;
 
 	context = pw_context_new(loop, NULL, 0);
-	if (context == NULL)
-		return NULL;
+	if (context == NULL) {
+		res = -errno;
+		goto error_cleanup;
+	}
 
 	impl = filter_new(context, name, props, props);
 	if (impl == NULL) {
+		props = NULL;
 		res = -errno;
 		goto error_cleanup;
 	}
@@ -1048,7 +1058,10 @@ pw_filter_new_simple(struct pw_loop *loop,
 	return this;
 
 error_cleanup:
-	pw_context_destroy(context);
+	if (context)
+		pw_context_destroy(context);
+	if (props)
+		pw_properties_free(props);
 	errno = -res;
 	return NULL;
 }
@@ -1075,12 +1088,16 @@ SPA_EXPORT
 void pw_filter_destroy(struct pw_filter *filter)
 {
 	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
+	struct port *p;
 
 	pw_log_debug(NAME" %p: destroy", filter);
 
 	pw_filter_emit_destroy(filter);
 
 	pw_filter_disconnect(filter);
+
+	spa_list_consume(p, &impl->port_list, link)
+		pw_filter_remove_port(p->user_data);
 
 	if (filter->core) {
 		spa_hook_remove(&filter->core_listener);
@@ -1229,7 +1246,7 @@ pw_filter_connect(struct pw_filter *filter,
 		spa_list_append(&filter->core->filter_list, &filter->link);
 		pw_core_add_listener(filter->core,
 				&filter->core_listener, &core_events, filter);
-		impl->free_proxy = true;
+		impl->disconnect_core = true;
 	}
 
 	pw_log_debug(NAME" %p: export node %p", filter, &impl->impl_node);
@@ -1266,11 +1283,12 @@ int pw_filter_disconnect(struct pw_filter *filter)
 	pw_log_debug(NAME" %p: disconnect", filter);
 	impl->disconnecting = true;
 
-	if (filter->proxy)
+	if (filter->proxy) {
 		pw_proxy_destroy(filter->proxy);
-
-	if (impl->free_proxy) {
-		impl->free_proxy = false;
+		filter->proxy = NULL;
+	}
+	if (impl->disconnect_core) {
+		impl->disconnect_core = false;
 		spa_hook_remove(&filter->core_listener);
 		spa_list_remove(&filter->link);
 		pw_core_disconnect(filter->core);
@@ -1443,16 +1461,18 @@ int pw_filter_set_error(struct pw_filter *filter,
 	if (res < 0) {
 		va_list args;
 		char *value;
+		int r;
 
 		va_start(args, error);
-		if (vasprintf(&value, error, args) < 0)
+		r = vasprintf(&value, error, args);
+		va_end(args);
+		if (r <  0)
 			return -errno;
 
 		if (filter->proxy)
 			pw_proxy_error(filter->proxy, res, value);
-
 		filter_set_state(filter, PW_FILTER_STATE_ERROR, value);
-		va_end(args);
+
 		free(value);
 	}
 	return res;

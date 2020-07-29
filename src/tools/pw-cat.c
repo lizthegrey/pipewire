@@ -486,8 +486,8 @@ static unsigned int find_channel(const char *name)
 	int i;
 
 	for (i = 0; spa_type_audio_channel[i].name; i++) {
-		if (strcmp(name, rindex(spa_type_audio_channel[i].name, ':')+1) == 0)
-			return i;
+		if (strcmp(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)) == 0)
+			return spa_type_audio_channel[i].type;
 	}
 	return SPA_AUDIO_CHANNEL_UNKNOWN;
 }
@@ -513,10 +513,9 @@ static int parse_channelmap(const char *channel_map, struct channelmap *map)
 	map->n_channels = nch;
 	for (i = 0; i < map->n_channels; i++) {
 		int c = find_channel(ch[i]);
-		if (c == SPA_AUDIO_CHANNEL_UNKNOWN)
-			return -1;
 		map->channels[i] = c;
 	}
+	pw_free_strv(ch);
 	return 0;
 }
 
@@ -563,7 +562,7 @@ static void channelmap_print(struct channelmap *map)
 		const char *name = spa_debug_type_find_name(spa_type_audio_channel, map->channels[i]);
 		if (name == NULL)
 			name = ":UNK";
-		printf("%s%s", rindex(name, ':')+1, i + 1 < map->n_channels ? "," : "");
+		printf("%s%s", spa_debug_type_short_name(name), i + 1 < map->n_channels ? "," : "");
 	}
 }
 
@@ -1069,6 +1068,7 @@ static int setup_sndfile(struct data *data)
 	const char *s;
 	unsigned int nom = 0;
 
+	spa_zero(info);
 	/* for record, you fill in the info first */
 	if (data->mode == mode_record) {
 		if (data->format == NULL)
@@ -1077,6 +1077,8 @@ static int setup_sndfile(struct data *data)
 			data->channels = DEFAULT_CHANNELS;
 		if (data->rate == 0)
 			data->rate = DEFAULT_RATE;
+		if (data->channelmap.n_channels == 0)
+			channelmap_default(&data->channelmap, data->channels);
 
 		memset(&info, 0, sizeof(info));
 		info.samplerate = data->rate;
@@ -1583,6 +1585,8 @@ error_connect_fail:
 	if (data.stream)
 		pw_stream_destroy(data.stream);
 error_no_stream:
+	if (data.registry)
+		pw_proxy_destroy((struct pw_proxy*)data.registry);
 error_no_registry:
 	pw_core_disconnect(data.core);
 error_ctx_connect_failed:
@@ -1598,6 +1602,7 @@ error_bad_file:
 		sf_close(data.file);
 	if (data.midi.file)
 		midi_file_close(data.midi.file);
+	pw_deinit();
 	return exit_code;
 
 error_usage:
