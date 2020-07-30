@@ -1,3 +1,5 @@
 usr/lib/*/spa-0.2/alsa
 usr/lib/*/alsa-lib
 usr/share/alsa/alsa.conf.d
+usr/share/alsa-card-profile
+lib/udev/rules.d/90-pipewire-alsa.rules
